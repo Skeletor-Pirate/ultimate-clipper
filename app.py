@@ -24,6 +24,7 @@ def on_find_highlights(
     chat_file: Optional[Any],
     prompt: str,
     duration_preset: str,
+    num_clips: int = 8,
     progress: gr.Progress = gr.Progress(),
 ) -> tuple[str, Any, float, float, str, str, Dict[str, Any]]:
     """Process ingestion, extract signals, and rank highlight intervals with robust error handling."""
@@ -48,23 +49,22 @@ def on_find_highlights(
             chat_sig = parse_chat_log(cp, duration=meta["duration"])
 
         progress(0.45, desc="Transcribing speech with faster-whisper (CPU int8)...")
-        def on_trans_prog(pct: float, desc: str):
-            progress(0.45 + pct * 0.40, desc=desc)
+        def on_trans_prog(pct: float, desc: str): progress(0.45 + pct * 0.40, desc=desc)
 
         try:
             trans_res = transcribe_audio(a_path, progress_cb=on_trans_prog)
         except Exception:
             trans_res = {"segments": [], "words": []}
 
-        progress(0.90, desc="Ranking top non-overlapping highlight intervals...")
-        cands = rank_highlights(meta["duration"], audio_sig, chat_sig, trans_res, prompt, duration_preset, top_k=6)
+        progress(0.90, desc=f"Ranking top {num_clips} non-overlapping highlight intervals...")
+        cands = rank_highlights(meta["duration"], audio_sig, chat_sig, trans_res, prompt, duration_preset, top_k=int(num_clips))
         if not cands:
             return "⚠️ No clear highlights found.", gr.update(choices=[], value=None), 0.0, 0.0, "", "", {}
 
         choices = [f"#{i+1}: {c['start']}s - {c['end']}s ({c['duration']}s) [{c['evidence_badge']}]" for i, c in enumerate(cands)]
         top = cands[0]
         state = {"video_path": v_path, "meta": meta, "transcript": trans_res, "candidates": cands}
-        status = f"✅ Found {len(cands)} highlight clips from {Path(v_path).name} ({meta['duration']:.1f}s)! Switch to Tab 2 to preview & render."
+        status = f"✅ Found {len(cands)} highlight clips from {Path(v_path).name}! Switch to Tab 2 to preview, adjust, or batch render all {len(cands)} clips."
         progress(1.0, desc="Done!")
         return status, gr.update(choices=choices, value=choices[0]), top["start"], top["end"], top["reason"], top.get("transcript_snippet", ""), state
 
@@ -95,11 +95,11 @@ def on_render_selected(
     music_vol: float,
     state: Dict[str, Any],
     progress: gr.Progress = gr.Progress(),
-) -> tuple[str, Optional[str]]:
+) -> tuple[str, Optional[str], Any]:
     """Render single clip using fast input seeking, background music mixing, and ASS subtitles."""
     v_path = state.get("video_path")
     if not v_path or not os.path.isfile(v_path):
-        return "❌ Video file missing or not ingested yet.", None
+        return "❌ Video file missing or not ingested yet.", None, gr.update()
 
     try:
         progress(0.3, desc="Rendering clip with FFmpeg fast seeking & ASS subtitles...")
@@ -109,23 +109,16 @@ def on_render_selected(
         m_path = music_file.name if hasattr(music_file, "name") else (str(music_file) if music_file else None)
 
         render_clip(
-            video_path=v_path,
-            start_sec=start_sec,
-            end_sec=end_sec,
-            output_mp4=str(out_file),
-            layout=layout,
-            corner=corner,
-            words=state.get("transcript", {}).get("words", []),
-            apply_loudnorm=True,
-            music_path=m_path,
-            music_volume=music_vol,
+            video_path=v_path, start_sec=start_sec, end_sec=end_sec, output_mp4=str(out_file),
+            layout=layout, corner=corner, words=state.get("transcript", {}).get("words", []),
+            apply_loudnorm=True, music_path=m_path, music_volume=music_vol,
         )
         progress(1.0, desc="Render complete!")
-        return f"🎉 Exported clip to: {out_file.name}", str(out_file)
+        return f"🎉 Exported clip to: {out_file.name}", str(out_file), gr.update(choices=[out_file.name], value=out_file.name)
     except Exception as exc:
         err = f"❌ Render failed: {str(exc)}"
         gr.Warning(err)
-        return err, None
+        return err, None, gr.update()
 
 
 def on_batch_export(
@@ -135,20 +128,20 @@ def on_batch_export(
     music_vol: float,
     state: Dict[str, Any],
     progress: gr.Progress = gr.Progress(),
-) -> tuple[str, Optional[str]]:
-    """Batch export all ranked candidates."""
+) -> tuple[str, Optional[str], Any]:
+    """Batch export all ranked candidates (creates 5 to 10 clips per round)."""
     cands, v_path = state.get("candidates", []), state.get("video_path")
     if not v_path or not cands:
-        return "❌ No highlights to batch export.", None
+        return "❌ No highlights to batch export.", None, gr.update()
 
     try:
         layout, corner = LAYOUT_MAP.get(layout_name, "gaming_split"), CORNER_MAP.get(corner_name, "bottom-left")
         words = state.get("transcript", {}).get("words", [])
         m_path = music_file.name if hasattr(music_file, "name") else (str(music_file) if music_file else None)
-        last_rendered = None
+        exported = []
 
         for i, c in enumerate(cands):
-            progress((i + 1) / len(cands), desc=f"Rendering clip {i+1}/{len(cands)}...")
+            progress((i + 1) / len(cands), desc=f"Rendering clip {i+1}/{len(cands)} ({int(c['start'])}s-{int(c['end'])}s)...")
             stem = Path(v_path).stem
             out_f = EXPORTS_DIR / f"{stem}_clip{i+1}_{int(c['start'])}s_{int(c['end'])}s_{layout}.mp4"
             render_clip(
@@ -156,13 +149,21 @@ def on_batch_export(
                 layout=layout, corner=corner, words=words,
                 apply_loudnorm=True, music_path=m_path, music_volume=music_vol
             )
-            last_rendered = str(out_f)
+            exported.append(out_f.name)
 
-        return f"🚀 Successfully batch exported {len(cands)} clips to ./exports/", last_rendered
+        first_clip = str(EXPORTS_DIR / exported[0]) if exported else None
+        return f"🚀 Successfully created all {len(exported)} clips in ./exports/!", first_clip, gr.update(choices=exported, value=exported[0])
     except Exception as exc:
         err = f"❌ Batch export failed: {str(exc)}"
         gr.Warning(err)
-        return err, None
+        return err, None, gr.update()
+
+
+def on_exported_select(filename: str) -> Optional[str]:
+    """Switch video preview when a clip is chosen from the exported gallery."""
+    if not filename: return None
+    p = EXPORTS_DIR / filename
+    return str(p) if p.is_file() else None
 
 
 def create_app() -> gr.Blocks:
@@ -182,8 +183,10 @@ def create_app() -> gr.Blocks:
                     prompt_box = gr.Textbox(label="Highlight Prompt", value="GTA 6 funny fails, chases, crazy reactions, 30-45s")
                 with gr.Column(scale=2):
                     chat_upload = gr.File(label="Optional Chat Log (.json / .txt)", file_types=[".json", ".txt"])
-                    preset_drop = gr.Dropdown(label="Target Clip Duration", choices=["15s", "30s", "45s", "60s", "Auto"], value="30s")
-            find_btn = gr.Button("🔍 Find Highlights", variant="primary", size="lg")
+                    with gr.Row():
+                        preset_drop = gr.Dropdown(label="Clip Duration", choices=["15s", "30s", "45s", "60s", "Auto"], value="30s")
+                        count_slider = gr.Slider(label="Clips to Create (5 to 10)", minimum=1, maximum=15, value=8, step=1)
+            find_btn = gr.Button("🔍 Find Highlights (Generate 5 to 10 Clips)", variant="primary", size="lg")
             status_box = gr.Textbox(label="Status", interactive=False)
 
         with gr.Tab("2. Review & Render"):
@@ -202,15 +205,16 @@ def create_app() -> gr.Blocks:
                         music_upload = gr.File(label="Optional Background Music (.mp3 / .wav)", file_types=[".mp3", ".wav", ".m4a"])
                         music_vol = gr.Slider(label="Music Volume Ducking", minimum=0.05, maximum=1.0, value=0.25, step=0.05)
                     with gr.Row():
-                        render_btn = gr.Button("🎬 Render Selected Clip", variant="primary")
-                        batch_btn = gr.Button("⚡ Batch Export All Highlights", variant="secondary")
+                        batch_btn = gr.Button("⚡ Batch Render All Clips (Create All 5-10)", variant="primary")
+                        render_btn = gr.Button("🎬 Render Single Selected Clip", variant="secondary")
                     render_status = gr.Textbox(label="Export Status", interactive=False)
                 with gr.Column(scale=2):
+                    exported_drop = gr.Dropdown(label="Exported Clips Gallery (Select to Watch)", choices=[], interactive=True)
                     video_preview = gr.Video(label="Rendered / Exported Video", interactive=False)
 
         find_btn.click(
             fn=on_find_highlights,
-            inputs=[source_box, chat_upload, prompt_box, preset_drop],
+            inputs=[source_box, chat_upload, prompt_box, preset_drop, count_slider],
             outputs=[status_box, cands_drop, start_slider, end_slider, reason_box, transcript_box, app_state],
         )
         cands_drop.change(
@@ -221,12 +225,17 @@ def create_app() -> gr.Blocks:
         render_btn.click(
             fn=on_render_selected,
             inputs=[start_slider, end_slider, layout_drop, corner_drop, music_upload, music_vol, app_state],
-            outputs=[render_status, video_preview],
+            outputs=[render_status, video_preview, exported_drop],
         )
         batch_btn.click(
             fn=on_batch_export,
             inputs=[layout_drop, corner_drop, music_upload, music_vol, app_state],
-            outputs=[render_status, video_preview],
+            outputs=[render_status, video_preview, exported_drop],
+        )
+        exported_drop.change(
+            fn=on_exported_select,
+            inputs=[exported_drop],
+            outputs=[video_preview],
         )
     return demo
 
