@@ -1,0 +1,8 @@
+av<16
+faster-whisper>=1.0.0
+gradio>=4.0.0
+yt-dlp
+soundfile
+numpy
+requests
+pytest
