@@ -1,5 +1,5 @@
 """app.py: 100% local Gradio web UI for Same-Day GTA 6 Gaming Clipper.
-Features fast seeking, middle-split animated ASS captions, background music, and batch export.
+Features fast seeking, middle-split animated ASS captions, background music, batch export, and creator assets hub.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from ingest import ingest_source
 from signals import compute_audio_energy, parse_chat_log, transcribe_audio
 from ranker import rank_highlights
 from render import render_clip
+from assets_hub import ASSETS_HUB_MARKDOWN
 
 LAYOUT_MAP = {"Gaming Split-Screen (9:16)": "gaming_split", "Fit with Blurred Background (9:16)": "blur_fit", "Full Center Crop (9:16)": "full_9_16", "16:9 Clean": "clean_16_9"}
 CORNER_MAP = {"Bottom-Left": "bottom-left", "Bottom-Center": "bottom-center", "Bottom-Right": "bottom-right", "Top-Left": "top-left", "Top-Center": "top-center", "Top-Right": "top-right"}
@@ -43,10 +44,7 @@ def on_find_highlights(
         audio_sig = compute_audio_energy(a_path)
 
         progress(0.35, desc="Parsing chat log (if provided)...")
-        chat_sig = None
-        if chat_file is not None:
-            cp = chat_file.name if hasattr(chat_file, "name") else str(chat_file)
-            chat_sig = parse_chat_log(cp, duration=meta["duration"])
+        chat_sig = parse_chat_log(chat_file.name if hasattr(chat_file, "name") else str(chat_file), duration=meta["duration"]) if chat_file else None
 
         progress(0.45, desc="Transcribing speech with faster-whisper (CPU int8)...")
         def on_trans_prog(pct: float, desc: str): progress(0.45 + pct * 0.40, desc=desc)
@@ -175,11 +173,7 @@ def create_app() -> gr.Blocks:
         with gr.Tab("1. Ingest & Highlight Discovery"):
             with gr.Row():
                 with gr.Column(scale=3):
-                    source_box = gr.Textbox(
-                        label="Local Video Path or URL",
-                        placeholder="e.g. C:\\Videos\\gta6_session.mp4 or https://youtube.com/watch?v=...",
-                        info="Enter local path to avoid multi-GB browser upload copies.",
-                    )
+                    source_box = gr.Textbox(label="Local Video Path or URL", placeholder="e.g. C:\\Videos\\gta6.mp4 or URL", info="Enter local path to avoid multi-GB upload copies.")
                     prompt_box = gr.Textbox(label="Highlight Prompt", value="GTA 6 funny fails, chases, crazy reactions, 30-45s")
                 with gr.Column(scale=2):
                     chat_upload = gr.File(label="Optional Chat Log (.json / .txt)", file_types=[".json", ".txt"])
@@ -193,8 +187,9 @@ def create_app() -> gr.Blocks:
             with gr.Row():
                 with gr.Column(scale=2):
                     cands_drop = gr.Dropdown(label="Ranked Highlights", choices=[], interactive=True)
-                    reason_box = gr.Textbox(label="Evidence & Reason", interactive=False, lines=2)
-                    transcript_box = gr.Textbox(label="Transcript Snippet", interactive=False, lines=2)
+                    with gr.Row():
+                        reason_box = gr.Textbox(label="Evidence & Reason", interactive=False, lines=1)
+                        transcript_box = gr.Textbox(label="Transcript Snippet", interactive=False, lines=1)
                     with gr.Row():
                         start_slider = gr.Slider(label="Start Time (s)", minimum=0, maximum=3600, step=0.1)
                         end_slider = gr.Slider(label="End Time (s)", minimum=0, maximum=3600, step=0.1)
@@ -212,31 +207,14 @@ def create_app() -> gr.Blocks:
                     exported_drop = gr.Dropdown(label="Exported Clips Gallery (Select to Watch)", choices=[], interactive=True)
                     video_preview = gr.Video(label="Rendered / Exported Video", interactive=False)
 
-        find_btn.click(
-            fn=on_find_highlights,
-            inputs=[source_box, chat_upload, prompt_box, preset_drop, count_slider],
-            outputs=[status_box, cands_drop, start_slider, end_slider, reason_box, transcript_box, app_state],
-        )
-        cands_drop.change(
-            fn=on_candidate_select,
-            inputs=[cands_drop, app_state],
-            outputs=[start_slider, end_slider, reason_box, transcript_box],
-        )
-        render_btn.click(
-            fn=on_render_selected,
-            inputs=[start_slider, end_slider, layout_drop, corner_drop, music_upload, music_vol, app_state],
-            outputs=[render_status, video_preview, exported_drop],
-        )
-        batch_btn.click(
-            fn=on_batch_export,
-            inputs=[layout_drop, corner_drop, music_upload, music_vol, app_state],
-            outputs=[render_status, video_preview, exported_drop],
-        )
-        exported_drop.change(
-            fn=on_exported_select,
-            inputs=[exported_drop],
-            outputs=[video_preview],
-        )
+        with gr.Tab("3. 🎨 Creator Assets Hub"):
+            gr.Markdown(ASSETS_HUB_MARKDOWN)
+
+        find_btn.click(fn=on_find_highlights, inputs=[source_box, chat_upload, prompt_box, preset_drop, count_slider], outputs=[status_box, cands_drop, start_slider, end_slider, reason_box, transcript_box, app_state])
+        cands_drop.change(fn=on_candidate_select, inputs=[cands_drop, app_state], outputs=[start_slider, end_slider, reason_box, transcript_box])
+        render_btn.click(fn=on_render_selected, inputs=[start_slider, end_slider, layout_drop, corner_drop, music_upload, music_vol, app_state], outputs=[render_status, video_preview, exported_drop])
+        batch_btn.click(fn=on_batch_export, inputs=[layout_drop, corner_drop, music_upload, music_vol, app_state], outputs=[render_status, video_preview, exported_drop])
+        exported_drop.change(fn=on_exported_select, inputs=[exported_drop], outputs=[video_preview])
     return demo
 
 
